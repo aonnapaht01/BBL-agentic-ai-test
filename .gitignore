@@ -59,10 +59,7 @@ coverage.xml
 # mypy
 .mypy_cache/
 
-# Screenshots (keep directory, ignore contents)
-screenshots/*.png
-screenshots/*.jpg
-screenshots/*.jpeg
+# Screenshots will be tracked for BBL assessment evidence
 
 # Logs
 *.log
