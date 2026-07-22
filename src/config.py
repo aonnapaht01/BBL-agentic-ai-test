@@ -2,21 +2,24 @@
 Centralized configuration management.
 
 Loads environment variables from ``.env`` and exposes typed, validated
-configuration objects used across the application. Supports **Groq**,
+configuration objects used across the application. Supports **BBL Custom API**, **Groq**,
 **Google Gemini**, **Azure OpenAI**, and **standard OpenAI** endpoints with 
 automatic priority-based selection via the ``get_llm()`` factory.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import os
+import urllib.request
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Any, List, Optional
 
 from dotenv import load_dotenv
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import BaseMessage, AIMessage
+from langchain_core.outputs import ChatResult, ChatGeneration
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
@@ -37,19 +40,92 @@ KNOWLEDGE_BASE_FILE = DATA_DIR / "knowledge_base.txt"
 
 
 # ---------------------------------------------------------------------------
+# Custom BBL LangChain Model
+# ---------------------------------------------------------------------------
+
+class BBLCustomChatModel(BaseChatModel):
+    """Custom LangChain Chat Model for the BBL Assessment Endpoint."""
+    
+    api_key: str
+    endpoint: str = "https://apimsdbxcandidate01.azure-api.net/llm/responses"
+    model_name: str = "gpt-5-mini"
+
+    @property
+    def _llm_type(self) -> str:
+        return "bbl_custom"
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        # Combine messages into a single prompt for this custom API
+        prompt = "\n\n".join([m.content for m in messages])
+        
+        headers = {
+            "api-key": self.api_key,
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": self.model_name,
+            "input": prompt
+        }
+        
+        req = urllib.request.Request(
+            self.endpoint, 
+            data=json.dumps(data).encode("utf-8"), 
+            headers=headers
+        )
+        
+        try:
+            with urllib.request.urlopen(req) as response:
+                resp_json = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8")
+            raise ValueError(f"BBL API HTTP {e.code}: {error_body}") from e
+            
+        # Parse the custom response payload
+        outputs = resp_json.get("output", [])
+        text_result = ""
+        for out in outputs:
+            if out.get("type") == "message" and "content" in out:
+                for c in out["content"]:
+                    if c.get("type") == "output_text":
+                        text_result = c.get("text", "")
+                        break
+        
+        if not text_result:
+            text_result = str(resp_json)  # Fallback if the structure differs
+            
+        message = AIMessage(content=text_result)
+        generation = ChatGeneration(message=message)
+        return ChatResult(generations=[generation])
+
+
+# ---------------------------------------------------------------------------
 # Settings model
 # ---------------------------------------------------------------------------
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables.
 
-    Supports four LLM backends with priority-based selection:
+    Supports five LLM backends with priority-based selection:
 
+    0. **BBL Custom API** - Assessment endpoint (``BBL_API_KEY``).
     1. **Groq** – fast & free local testing (``GROQ_API_KEY``).
     2. **Google Gemini** – free-tier local testing (``GOOGLE_API_KEY``).
     3. **Azure OpenAI** – enterprise / BBL submission.
     4. **Standard OpenAI** – default fallback.
     """
+
+    # --- BBL Custom API (Priority 0) ----------------------------------------
+    bbl_api_key: Optional[str] = Field(
+        default=None,
+        alias="BBL_API_KEY",
+        description="API key for the BBL Custom Endpoint.",
+    )
 
     # --- Groq (Priority 1) --------------------------------------------------
     groq_api_key: Optional[str] = Field(
@@ -119,6 +195,11 @@ class Settings(BaseSettings):
     # --- Computed helpers ----------------------------------------------------
 
     @property
+    def use_bbl(self) -> bool:
+        """Return True if BBL credentials are configured."""
+        return bool(self.bbl_api_key)
+
+    @property
     def use_groq(self) -> bool:
         """Return True if Groq credentials are configured."""
         return bool(self.groq_api_key)
@@ -152,25 +233,26 @@ def get_llm() -> BaseChatModel:
     """Dynamically instantiate the appropriate LangChain Chat Model.
 
     Selection priority:
-
+    
+    0. **BBL Custom API** - if ``BBL_API_KEY`` is set.
     1. **Groq** — if ``GROQ_API_KEY`` is set.
-       Uses ``llama-3.1-8b-instant`` by default (overridden if
-       ``LLM_MODEL`` contains ``"llama"`` or ``"mixtral"``).
     2. **Google Gemini** — if ``GOOGLE_API_KEY`` is set.
-       Uses ``gemini-2.0-flash`` by default (overridden if
-       ``LLM_MODEL`` contains ``"gemini"``).
     3. **Azure OpenAI** — if ``AZURE_OPENAI_ENDPOINT`` *and*
        ``AZURE_OPENAI_API_KEY`` are both set.
     4. **Standard OpenAI** — fallback using ``OPENAI_API_KEY``.
 
     Returns:
         A ready-to-use ``BaseChatModel`` instance.
-
-    Raises:
-        ImportError: If required packages like ``langchain-groq`` or
-            ``langchain-google-genai`` are not installed.
     """
     settings = get_settings()
+    
+    # ── Priority 0: BBL Custom Assessment Endpoint ──────────────────────
+    if settings.use_bbl:
+        logger.info("Using BBL Custom API model: %s", settings.llm_model)
+        return BBLCustomChatModel(
+            api_key=settings.bbl_api_key,
+            model_name=settings.llm_model
+        )
 
     # ── Priority 1: Groq ────────────────────────────────────────────────
     if settings.use_groq:
@@ -183,7 +265,6 @@ def get_llm() -> BaseChatModel:
                 "Install it with:  pip install langchain-groq"
             ) from exc
 
-        # Use LLM_MODEL if it's a Groq model name; otherwise default
         model_name = (
             settings.llm_model
             if any(x in settings.llm_model.lower() for x in ["llama", "mixtral"])
@@ -207,7 +288,6 @@ def get_llm() -> BaseChatModel:
                 "Install it with:  pip install langchain-google-genai"
             ) from exc
 
-        # Use LLM_MODEL if it's a Gemini model name; otherwise default
         model_name = (
             settings.llm_model
             if "gemini" in settings.llm_model.lower()
