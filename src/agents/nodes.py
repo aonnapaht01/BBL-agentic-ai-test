@@ -16,13 +16,12 @@ from datetime import datetime, timezone
 from typing import List, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
 from src.agents.prompts import (
     DATA_RETRIEVER_SYSTEM_PROMPT,
     REPORT_GENERATOR_SYSTEM_PROMPT,
 )
-from src.config import get_settings
+from src.config import get_llm
 from src.tools.retriever import search_knowledge_base_impl
 
 logger = logging.getLogger(__name__)
@@ -57,32 +56,6 @@ class AgentState(TypedDict):
 def _timestamp() -> str:
     """Return a compact UTC timestamp string."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _get_llm() -> ChatOpenAI | AzureChatOpenAI:
-    """Instantiate the appropriate LLM client based on configuration.
-
-    Returns:
-        A ``ChatOpenAI`` or ``AzureChatOpenAI`` instance ready for
-        ``.invoke()`` calls.
-    """
-    settings = get_settings()
-
-    if settings.use_azure:
-        logger.info("Using Azure OpenAI endpoint: %s", settings.azure_openai_endpoint)
-        return AzureChatOpenAI(
-            azure_endpoint=settings.azure_openai_endpoint,
-            azure_deployment=settings.llm_model,
-            api_key=settings.azure_openai_api_key,
-            api_version=settings.azure_openai_api_version,
-            temperature=settings.llm_temperature,
-        )
-
-    return ChatOpenAI(
-        model=settings.llm_model,
-        api_key=settings.openai_api_key,
-        temperature=settings.llm_temperature,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +113,9 @@ def report_generator_node(state: AgentState) -> dict:
     The Report Generator system prompt instructs the model to rely strictly
     on the provided context snippets and format the output in Markdown.
 
+    Uses the centralized ``get_llm()`` factory from ``src.config`` to
+    obtain the appropriate LLM backend (Google Gemini / Azure / OpenAI).
+
     Args:
         state: The current graph state containing ``user_query`` and
                ``retrieved_snippets``.
@@ -151,7 +127,7 @@ def report_generator_node(state: AgentState) -> dict:
     snippets: str = state["retrieved_snippets"]
     logger.info("[ReportGenerator] Generating report for: %s", query)
 
-    llm = _get_llm()
+    llm = get_llm()
 
     # Build the message sequence for the LLM
     messages = [

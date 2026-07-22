@@ -5,10 +5,16 @@
 # LangChain ecosystem
 langchain>=0.2.0
 langchain-openai>=0.1.0
+langchain-google-genai>=1.0.0
+langchain-groq>=0.1.0
 langgraph>=0.1.0
 
 # Environment & configuration
 python-dotenv>=1.0.0
 
-# Data validation
+# Data validation & settings
 pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# CLI output
+rich>=13.0.0
